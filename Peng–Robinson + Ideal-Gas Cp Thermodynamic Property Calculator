@@ -1,0 +1,266 @@
+import numpy as np
+
+R = 8.31446261815324
+
+def peng_robinson_Z(T, P, Tc, Pc, omega, phase="vapor"):
+
+    Tr = T / Tc
+    Pr = P / Pc
+
+    kappa = 0.37464 + 1.54226 * omega - 0.26992 * omega**2
+    alpha = (1.0 + kappa * (1.0 - np.sqrt(Tr)))**2
+
+    A = 0.45724 * alpha * Pr / Tr**2
+    B = 0.07780 * Pr / Tr
+
+    c2 = -(1.0 - B)
+    c1 = A - 3.0 * B**2 - 2.0 * B
+    c0 = -(A * B - B**2 - B**3)
+
+    coeffs = np.array([1.0, c2, c1, c0], dtype=float)
+    roots_all = np.roots(coeffs)
+
+    roots_real = np.real(roots_all[np.isclose(roots_all.imag, 0.0, atol=1e-8)])
+    roots_real = np.sort(roots_real)
+
+    if len(roots_real) == 0:
+        raise RuntimeError("No real roots found for Peng–Robinson cubic!")
+
+    if phase == "vapor":
+        Z = roots_real.max()
+    elif phase == "liquid":
+        Z = roots_real.min()
+    else:
+        raise ValueError("phase must be 'vapor' or 'liquid'")
+
+    return float(Z), roots_real.tolist()
+
+
+def peng_robinson_departures(T, P, Tc, Pc, omega, phase="vapor"):
+   
+    Z, roots = peng_robinson_Z(T, P, Tc, Pc, omega, phase=phase)
+
+    Tr = T / Tc
+    Pr = P / Pc
+
+    kappa = 0.37464 + 1.54226 * omega - 0.26992 * omega**2
+    alpha = (1.0 + kappa * (1.0 - np.sqrt(Tr)))**2
+    B = 0.07780 * Pr / Tr
+    A = 0.45724 * alpha * Pr / Tr**2
+
+    sqrt2 = np.sqrt(2.0)
+    term1 = Z - 1.0 - np.log(Z - B)
+    term2 = (A / (2.0 * sqrt2 * B)) * np.log(
+        (Z + (1.0 + sqrt2) * B) / (Z + (1.0 - sqrt2) * B)
+    )
+    ln_phi = term1 - term2
+    phi = np.exp(ln_phi)
+
+    f = phi * P
+
+    log_term = np.log((Z + 2.414 * B) / (Z - 0.414 * B))
+
+    h_dep = R * Tc * (
+        Tr * (Z - 1.0)
+        - 2.078 * (1.0 + kappa) * np.sqrt(alpha) * log_term
+    )
+
+    s_dep = R * (
+        np.log(Z - B)
+        - 2.078 * kappa * ((1.0 + kappa) / np.sqrt(Tr) - kappa) * log_term
+    )
+
+    u_dep = h_dep - R * T * (Z - 1.0)
+
+    g_dep = R * T * ln_phi
+
+    return {
+        "Z": Z,
+        "roots": roots,
+        "h_dep": h_dep,
+        "s_dep": s_dep,
+        "u_dep": u_dep,
+        "g_dep": g_dep,
+        "h_dep_RT": h_dep / (R * T),
+        "s_dep_R": s_dep / R,
+        "u_dep_RT": u_dep / (R * T),
+        "ln_phi": ln_phi,
+        "phi": phi,
+        "fugacity": f,
+    }
+
+def cp_ideal_DIPPR(T, A_cp, B_cp, C_cp, D_cp, E_cp):
+ 
+    T = np.asarray(T, dtype=float)
+    return (A_cp
+            + B_cp * T
+            + C_cp * T**2
+            + D_cp * T**3
+            + E_cp / T**2)
+
+
+def h_ideal_DIPPR(T, A_cp, B_cp, C_cp, D_cp, E_cp, Tref=298.15):
+
+    T = float(T)
+
+    def H_primitive(T_):
+        return (A_cp * T_
+                + 0.5 * B_cp * T_**2
+                + (C_cp / 3.0) * T_**3
+                + (D_cp / 4.0) * T_**4
+                - E_cp / T_)
+
+    return H_primitive(T) - H_primitive(Tref)
+
+
+def s_ideal_DIPPR(T, P, A_cp, B_cp, C_cp, D_cp, E_cp,
+                  Tref=298.15, Pref=1.0):
+ 
+    T = float(T)
+    P = float(P)
+
+    def S_primitive(T_):
+        return (A_cp * np.log(T_)
+                + B_cp * T_
+                + 0.5 * C_cp * T_**2
+                + (D_cp / 3.0) * T_**3
+                - 0.5 * E_cp / T_**2)
+
+    s_T_part = S_primitive(T) - S_primitive(Tref)
+    s_P_part = -R * np.log(P / Pref)
+
+    return s_T_part + s_P_part
+
+
+def real_properties_PR_DIPPR(
+    T, P,
+    Tc, Pc, omega,
+    A_cp, B_cp, C_cp, D_cp, E_cp,
+    phase="vapor",
+    Tref=298.15,
+    Pref=1.0,
+    P_std=1.0,  
+):
+    
+
+    pr = peng_robinson_departures(T, P, Tc, Pc, omega, phase=phase)
+    Z = pr["Z"]
+    h_dep = pr["h_dep"]
+    s_dep = pr["s_dep"]
+    u_dep = pr["u_dep"]
+    g_dep = pr["g_dep"]
+    phi = pr["phi"]
+    f = pr["fugacity"]
+
+  
+    h_ig = h_ideal_DIPPR(T, A_cp, B_cp, C_cp, D_cp, E_cp, Tref=Tref)
+    s_ig = s_ideal_DIPPR(T, P, A_cp, B_cp, C_cp, D_cp, E_cp,
+                         Tref=Tref, Pref=Pref)
+    
+    u_ig = h_ig - R * T
+
+   
+    g_ig = h_ig - T * s_ig
+    g_real = g_ig + g_dep  
+
+   
+    h_real = h_ig + h_dep
+    s_real = s_ig + s_dep
+    u_real = u_ig + u_dep
+
+   
+    activity = f / P_std
+
+    return {
+        "Z": Z,
+        "h_dep": h_dep,
+        "s_dep": s_dep,
+        "u_dep": u_dep,
+        "g_dep": g_dep,
+        "h_ig": h_ig,
+        "s_ig": s_ig,
+        "u_ig": u_ig,
+        "g_ig": g_ig,
+        "h_real": h_real,
+        "s_real": s_real,
+        "u_real": u_real,
+        "g_real": g_real,
+        "phi": phi,
+        "fugacity": f,
+        "activity": activity,
+    }
+
+# 4) Example usage
+
+if __name__ == "__main__":
+    # Example gas: N2-like (Tc, Pc, omega) – change to your gas if needed
+    Tc_Gas = 126.2      # K
+    Pc_Gas = 33.98      # bar
+    omega_Gas = 0.037
+
+    # Cp^IG(T) coefficients (DIPPR-type) – placeholder example
+    A_cp_Gas = 28.90      # J/mol/K
+    B_cp_Gas = -0.1520 * (10**-2)
+    C_cp_Gas = 0.8081 * (10**-5)
+    D_cp_Gas = -2.873 * (10**-9)
+    E_cp_Gas = 0.0
+
+    # state 2
+    T = 313.15   # K 
+    P = 60.0     # bar
+
+    # reference state (state 1)
+    Tref = 223.15   # K  
+    Pref = 20.0     # bar
+
+    res = real_properties_PR_DIPPR(
+        T, P,
+        Tc_Gas, Pc_Gas, omega_Gas,
+        A_cp_Gas, B_cp_Gas, C_cp_Gas, D_cp_Gas, E_cp_Gas,
+        phase="vapor",
+        Tref=Tref,
+        Pref=Pref,
+        P_std=1.0,   # standard pressure for activity
+    )
+
+    print("=== Gas at T = {} K, P = {} bar ===".format(T, P))
+    print("Z        = {:.6f}".format(res["Z"]))
+    print("h_dep    = {:.3f} J/mol".format(res["h_dep"]))
+    print("s_dep    = {:.5f} J/mol/K".format(res["s_dep"]))
+    print("u_dep    = {:.3f} J/mol".format(res["u_dep"]))
+    print("g_dep    = {:.3f} J/mol".format(res["g_dep"]))
+    print("h_ig     = {:.3f} J/mol (relative to Tref)".format(res["h_ig"]))
+    print("s_ig     = {:.5f} J/mol/K (relative to Tref,Pref)".format(res["s_ig"]))
+    print("g_ig     = {:.3f} J/mol".format(res["g_ig"]))
+    print("h_real   = {:.3f} J/mol".format(res["h_real"]))
+    print("s_real   = {:.5f} J/mol/K".format(res["s_real"]))
+    print("g_real   = {:.3f} J/mol".format(res["g_real"]))
+    print("u_real   = {:.3f} J/mol".format(res["u_real"]))
+    print("phi      = {:.6f}".format(res["phi"]))
+    print("fugacity = {:.3f} bar".format(res["fugacity"]))
+    print("activity = {:.6f}".format(res["activity"]))
+
+    # ====== mass basis (kJ/kg, kJ/kg.K) ======
+    M = 0.0280134  # kg/mol  (N2 molar mass – change for other gases)
+
+    def mol_to_kJkg(val):
+        return val / M / 1000.0
+
+    def mol_to_kJkgK(val):
+        return val / M / 1000.0
+
+    print("\n--- mass basis ---")
+    print("h_dep   = {:.3f} kJ/kg".format(mol_to_kJkg(res["h_dep"])))
+    print("s_dep   = {:.5f} kJ/kg.K".format(mol_to_kJkgK(res["s_dep"])))
+    print("u_dep   = {:.3f} kJ/kg".format(mol_to_kJkg(res["u_dep"])))
+    print("g_dep   = {:.3f} kJ/kg".format(mol_to_kJkg(res["g_dep"])))
+
+    print("h_ig    = {:.3f} kJ/kg".format(mol_to_kJkg(res["h_ig"])))
+    print("s_ig    = {:.5f} kJ/kg.K".format(mol_to_kJkgK(res["s_ig"])))
+    print("g_ig    = {:.3f} kJ/kg".format(mol_to_kJkg(res["g_ig"])))
+    print("u_ig    = {:.3f} kJ/kg".format(mol_to_kJkg(res["u_ig"])))
+
+    print("h_real  = {:.3f} kJ/kg".format(mol_to_kJkg(res["h_real"])))
+    print("s_real  = {:.5f} kJ/kg.K".format(mol_to_kJkgK(res["s_real"])))
+    print("g_real  = {:.3f} kJ/kg".format(mol_to_kJkg(res["g_real"])))
+    print("u_real  = {:.3f} kJ/kg".format(mol_to_kJkg(res["u_real"])))
